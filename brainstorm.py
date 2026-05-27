@@ -64,9 +64,9 @@ def load_reference_papers() -> str:
         filename = os.path.basename(pdf_path)
         try:
             reader = pypdf.PdfReader(pdf_path)
-            # 提取前 3 页（通常包含 abstract + intro + method overview）
+            # 提取前 5 页（abstract + intro + method）
             pages_text = []
-            for i, page in enumerate(reader.pages[:3]):
+            for i, page in enumerate(reader.pages[:5]):
                 text = page.extract_text()
                 if text:
                     pages_text.append(text.strip())
@@ -74,10 +74,10 @@ def load_reference_papers() -> str:
             if not pages_text:
                 continue
 
-            # 截断到 ~3000 字符，避免 system message 过长
+            # 截断到 ~8000 字符，保留足够的 abstract + intro + method
             full_text = "\n".join(pages_text)
-            if len(full_text) > 3000:
-                full_text = full_text[:3000] + "\n[...truncated]"
+            if len(full_text) > 8000:
+                full_text = full_text[:8000] + "\n[...truncated]"
 
             summaries.append(
                 f"### {filename}\n{full_text}\n"
