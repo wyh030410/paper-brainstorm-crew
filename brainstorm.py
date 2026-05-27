@@ -160,8 +160,24 @@ def load_reference_papers() -> str:
     )
 
 
+# 支持 --resummarize 参数强制重新总结
+import sys
+if "--resummarize" in sys.argv:
+    if SUMMARY_CACHE and os.path.exists(SUMMARY_CACHE):
+        os.remove(SUMMARY_CACHE)
+        print("[PDF] Cleared summary cache — will re-summarize all papers.")
+
 # Load reference papers at startup
 _reference_papers = load_reference_papers()
+
+# 启动时打印摘要，方便 review
+if _reference_papers:
+    print("=" * 60)
+    print("LOADED REFERENCE PAPER SUMMARIES")
+    print("=" * 60)
+    print(_reference_papers)
+    print("=" * 60)
+    print("(If summaries look wrong, re-run with: python brainstorm.py --resummarize)\n")
 
 
 # ============================================================
