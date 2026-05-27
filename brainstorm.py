@@ -481,12 +481,87 @@ Rules:
 )
 
 
+# ---- Proposal Writer ----
+proposal_writer = autogen.AssistantAgent(
+    name="proposal_writer",
+    llm_config=llm_config,
+    system_message="""You are a proposal writer for top-tier CS venues.
+You are ONLY activated when an idea is LOCKED (someone says "IDEA LOCKED").
+
+When activated, write a 1-page structured proposal in this EXACT format:
+
+# <One-sentence title>
+
+## Abstract
+<150-word abstract: problem, approach, key result>
+
+## Problem Statement
+<What specific gap exists? Why does it matter? (3-5 sentences)>
+
+## Proposed Method
+<Core technical approach, step by step (5-8 bullets)>
+
+## Experiments
+- **Dataset:** <specific datasets>
+- **Baselines:** <specific models to compare against>
+- **Metrics:** <specific metrics>
+- **Headline experiment:** <the one result that carries the paper>
+- **Ablations:** <2-3 ablation studies>
+
+## Expected Results
+<What you expect to show, with rough numbers if possible (3-4 bullets)>
+
+## Timeline (4 months)
+- Month 1: ...
+- Month 2: ...
+- Month 3: ...
+- Month 4: ...
+
+## Risks & Mitigations
+<Top 3 risks, each with a mitigation strategy>
+
+Rules:
+1. Be SPECIFIC — no vague claims. Name datasets, models, numbers.
+2. After writing, call save_proposal to save it as a file.
+3. Keep it to 1 page worth of content. Concise > comprehensive.
+""",
+)
+
+
+def save_proposal(
+    title: Annotated[str, "Short title for the proposal, used as filename (e.g. 'quantized-vla-lora')"],
+    content: Annotated[str, "The full proposal content in Markdown"],
+) -> str:
+    """Save the proposal to proposals/<title>.md"""
+    proposals_dir = os.path.join(os.path.dirname(__file__), "proposals")
+    os.makedirs(proposals_dir, exist_ok=True)
+
+    # 清理文件名
+    slug = title.lower().replace(" ", "-")
+    for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+        slug = slug.replace(ch, '')
+    filepath = os.path.join(proposals_dir, f"{slug}.md")
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return f"Proposal saved to {filepath}"
+
+
+proposal_writer.register_for_llm(
+    name="save_proposal",
+    description="Save a structured proposal to proposals/<title>.md",
+)(save_proposal)
+
+user.register_for_execution(name="save_proposal")(save_proposal)
+
+
 # ============================================================
 # Group Chat Setup
 # ============================================================
 
 groupchat = autogen.GroupChat(
-    agents=[user, explorer, lit_expert, critic, mentor, venue_expert],
+    agents=[user, explorer, lit_expert, critic, mentor, venue_expert, proposal_writer],
     messages=[],
     max_round=40,
     speaker_selection_method="auto",
@@ -514,8 +589,9 @@ Rules:
 - After 5-6 rounds on one idea without convergence, pivot to a new
   direction (suggest Explorer try another angle).
 - Periodically (every ~6 rounds) check in with the User.
-- When the User says "lock this idea" or "I'm happy", instruct
-  Explorer to produce the final 1-page proposal and end the session.
+- When the User says "lock this idea" or "I'm happy", OR when
+  Explorer says "IDEA LOCKED", immediately call on ProposalWriter
+  to write the structured 1-page proposal and save it to file.
 """,
 )
 
