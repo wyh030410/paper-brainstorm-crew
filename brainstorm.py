@@ -23,6 +23,7 @@ Usage:
 import os
 import json
 import hashlib
+import glob
 import urllib.request
 import urllib.parse
 from typing import Annotated
@@ -30,6 +31,73 @@ from dotenv import load_dotenv
 import autogen
 
 load_dotenv()
+
+
+# ============================================================
+# PDF Paper Ingestion
+# ============================================================
+# Reads PDFs from the docs/ folder and extracts text summaries.
+# These summaries are injected into literature_expert's system
+# message so it has direct knowledge of the user's reference papers.
+
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+
+
+def load_reference_papers() -> str:
+    """读取 docs/ 下所有 PDF，提取前 3 页文本作为摘要。"""
+    if not os.path.isdir(DOCS_DIR):
+        return ""
+
+    pdf_files = glob.glob(os.path.join(DOCS_DIR, "*.pdf"))
+    if not pdf_files:
+        return ""
+
+    try:
+        import pypdf
+    except ImportError:
+        print("[WARNING] pypdf not installed — skipping PDF ingestion. "
+              "Run: pip install pypdf")
+        return ""
+
+    summaries = []
+    for pdf_path in sorted(pdf_files):
+        filename = os.path.basename(pdf_path)
+        try:
+            reader = pypdf.PdfReader(pdf_path)
+            # 提取前 3 页（通常包含 abstract + intro + method overview）
+            pages_text = []
+            for i, page in enumerate(reader.pages[:3]):
+                text = page.extract_text()
+                if text:
+                    pages_text.append(text.strip())
+
+            if not pages_text:
+                continue
+
+            # 截断到 ~3000 字符，避免 system message 过长
+            full_text = "\n".join(pages_text)
+            if len(full_text) > 3000:
+                full_text = full_text[:3000] + "\n[...truncated]"
+
+            summaries.append(
+                f"### {filename}\n{full_text}\n"
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to read {filename}: {e}")
+
+    if not summaries:
+        return ""
+
+    return (
+        "\n\n--- REFERENCE PAPERS (from docs/ folder) ---\n"
+        "You have DIRECT access to the following papers. Use this knowledge "
+        "when checking novelty — these are ground truth, not guesses.\n\n"
+        + "\n---\n".join(summaries)
+    )
+
+
+# Load reference papers at startup
+_reference_papers = load_reference_papers()
 
 
 # ============================================================
@@ -218,7 +286,7 @@ Rules:
 4. Keep responses tight: a few bullets, not a literature review.
 5. You have a search_papers tool — USE IT to verify claims instead of
    guessing. Search before making novelty judgments.
-""",
+""" + _reference_papers,
 )
 
 # Register the search tool so literature_expert can call it

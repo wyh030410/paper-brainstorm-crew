@@ -7,3 +7,4 @@ sessions/
 proposals/
 .DS_Store
 .paper_cache.json
+docs/*.pdf
