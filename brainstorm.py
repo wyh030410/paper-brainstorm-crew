@@ -550,8 +550,55 @@ Let's start. Senior Explorer, propose your first idea — but ONE idea,
 not a list. Make it specific and bold.
 """
 
+def export_session(messages):
+    """将完整对话导出为 Markdown 文件到 sessions/ 目录。"""
+    from datetime import datetime
+
+    sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+    filepath = os.path.join(sessions_dir, f"{timestamp}.md")
+
+    lines = []
+    lines.append(f"# Brainstorm Session — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+
+    # 检查是否有 IDEA LOCKED
+    locked_ideas = []
+
+    for msg in messages:
+        name = msg.get("name", msg.get("role", "unknown"))
+        content = msg.get("content", "")
+        if not content:
+            continue
+
+        lines.append(f"## {name}\n")
+        lines.append(f"{content}\n")
+        lines.append("---\n")
+
+        # 提取 IDEA LOCKED 内容
+        if "IDEA LOCKED" in content.upper():
+            locked_ideas.append(content)
+
+    # 如果有 locked idea，在末尾单独列出
+    if locked_ideas:
+        lines.append("\n# LOCKED IDEAS\n")
+        for i, idea in enumerate(locked_ideas, 1):
+            lines.append(f"## Locked Idea {i}\n")
+            lines.append(f"{idea}\n")
+            lines.append("---\n")
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"\n[Session] Transcript saved to {filepath}")
+    return filepath
+
+
 if __name__ == "__main__":
     user.initiate_chat(
         manager,
         message=INITIAL_PROMPT,
     )
+    # 会话结束后自动导出
+    export_session(groupchat.messages)
