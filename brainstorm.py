@@ -36,28 +36,15 @@ load_dotenv()
 # ============================================================
 # PDF Paper Ingestion (AI-summarized)
 # ============================================================
-# Reads PDFs from docs/, uses Claude to summarize each paper's
-# key points, and caches summaries in docs/.summaries.json.
-# The condensed summaries are injected into literature_expert's
-# system message — much more token-efficient than raw text.
+# 工作方式:
+#   docs/          — 放 PDF 原文
+#   docs/summaries/ — 每篇论文一个 .md 总结文件（AI 生成）
+#
+# 有对应 .md 的 PDF 视为"已读"，跳过不重新处理。
+# literature_expert 的知识库只从 docs/summaries/ 读取。
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
-SUMMARY_CACHE = os.path.join(DOCS_DIR, ".summaries.json") if os.path.isdir(
-    os.path.join(os.path.dirname(__file__), "docs")
-) else ""
-
-
-def _load_summary_cache() -> dict:
-    if SUMMARY_CACHE and os.path.exists(SUMMARY_CACHE):
-        with open(SUMMARY_CACHE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-
-def _save_summary_cache(cache: dict):
-    if SUMMARY_CACHE:
-        with open(SUMMARY_CACHE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2, ensure_ascii=False)
+SUMMARIES_DIR = os.path.join(DOCS_DIR, "summaries")
 
 
 def _summarize_with_llm(paper_text: str, filename: str) -> str:
@@ -98,97 +85,121 @@ Paper text from {filename}:
         return f"[Summary failed — raw excerpt]\n{paper_text[:2000]}"
 
 
-def load_reference_papers() -> str:
-    """读取 docs/ 下所有 PDF，用 AI 总结后返回。结果缓存到本地。"""
+def _get_summary_path(pdf_filename: str) -> str:
+    """PDF 文件名 → 对应的摘要 .md 路径。"""
+    name = os.path.splitext(pdf_filename)[0]
+    return os.path.join(SUMMARIES_DIR, f"{name}.md")
+
+
+def _process_new_pdfs():
+    """扫描 docs/ 里的 PDF，没有对应摘要的就用 AI 总结并保存。"""
     if not os.path.isdir(DOCS_DIR):
-        return ""
+        return
 
     pdf_files = glob.glob(os.path.join(DOCS_DIR, "*.pdf"))
     if not pdf_files:
-        return ""
+        return
 
     try:
         import pypdf
     except ImportError:
         print("[WARNING] pypdf not installed — skipping PDF ingestion. "
               "Run: pip install pypdf")
-        return ""
+        return
 
-    cache = _load_summary_cache()
-    summaries = []
-    updated = False
+    os.makedirs(SUMMARIES_DIR, exist_ok=True)
 
     for pdf_path in sorted(pdf_files):
         filename = os.path.basename(pdf_path)
-        # 用文件大小+文件名作为缓存 key，文件变了就重新总结
-        file_size = os.path.getsize(pdf_path)
-        cache_key = f"{filename}|{file_size}"
+        summary_path = _get_summary_path(filename)
 
-        if cache_key in cache:
-            summaries.append(f"### {filename}\n{cache[cache_key]}\n")
+        # 已有摘要文件 → 已读，跳过
+        if os.path.exists(summary_path):
             continue
 
-        # 需要新总结
+        # 新论文，需要总结
         try:
             reader = pypdf.PdfReader(pdf_path)
             pages_text = []
-            for page in reader.pages:  # 读全文所有页
+            for page in reader.pages:  # 读全文
                 text = page.extract_text()
                 if text:
                     pages_text.append(text.strip())
 
             if not pages_text:
+                print(f"[PDF] Skipping {filename} — no text extracted")
                 continue
 
             full_text = "\n".join(pages_text)
-            print(f"[PDF] Summarizing {filename} with AI...")
+            print(f"[PDF] Summarizing {filename} with AI (full paper, {len(reader.pages)} pages)...")
             summary = _summarize_with_llm(full_text, filename)
-            cache[cache_key] = summary
-            updated = True
-            summaries.append(f"### {filename}\n{summary}\n")
-        except Exception as e:
-            print(f"[WARNING] Failed to read {filename}: {e}")
 
-    if updated:
-        _save_summary_cache(cache)
+            # 保存为 .md 文件
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(summary)
+            print(f"[PDF] Saved summary → {os.path.relpath(summary_path)}")
+        except Exception as e:
+            print(f"[WARNING] Failed to process {filename}: {e}")
+
+
+def load_reference_papers() -> str:
+    """从 docs/summaries/ 读取所有 .md 摘要文件，拼接为知识库。"""
+    if not os.path.isdir(SUMMARIES_DIR):
+        return ""
+
+    md_files = sorted(glob.glob(os.path.join(SUMMARIES_DIR, "*.md")))
+    if not md_files:
+        return ""
+
+    summaries = []
+    for md_path in md_files:
+        filename = os.path.basename(md_path)
+        with open(md_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            summaries.append(f"### {filename}\n{content}\n")
 
     if not summaries:
         return ""
 
     return (
-        "\n\n--- REFERENCE PAPERS (AI-summarized from docs/ folder) ---\n"
-        "You have structured summaries of the user's reference papers below. "
-        "Use this knowledge when checking novelty — these are ground truth.\n\n"
+        "\n\n--- REFERENCE PAPERS (from docs/summaries/) ---\n"
+        "You have AI-generated structured summaries of the user's reference "
+        "papers below. Use this knowledge when checking novelty.\n\n"
         + "\n---\n".join(summaries)
     )
 
 
-# 支持 --resummarize 参数强制重新总结
+# CLI 参数处理
 import sys
-if "--resummarize" in sys.argv:
-    if SUMMARY_CACHE and os.path.exists(SUMMARY_CACHE):
-        os.remove(SUMMARY_CACHE)
-        print("[PDF] Cleared summary cache — will re-summarize all papers.")
 
-# Load reference papers at startup
+# --resummarize: 删除所有摘要，强制重新总结
+if "--resummarize" in sys.argv:
+    if os.path.isdir(SUMMARIES_DIR):
+        for f in glob.glob(os.path.join(SUMMARIES_DIR, "*.md")):
+            os.remove(f)
+        print("[PDF] Cleared all summaries — will re-summarize all papers.")
+
+# 处理新 PDF（没有对应 .md 的）
+_process_new_pdfs()
+
+# 从 summaries/ 加载知识库
 _reference_papers = load_reference_papers()
 
-# 启动时打印论文列表（不打印完整摘要，太多了刷屏）
+# 启动时打印论文列表
 if _reference_papers:
-    cache = _load_summary_cache()
-    paper_count = len(cache)
+    md_files = glob.glob(os.path.join(SUMMARIES_DIR, "*.md"))
     total_chars = len(_reference_papers)
-    print(f"[PDF] Loaded {paper_count} reference papers ({total_chars} chars in system message):")
-    for key in cache:
-        name = key.split("|")[0]
-        print(f"  - {name}")
+    print(f"\n[Knowledge Base] {len(md_files)} papers loaded ({total_chars} chars):")
+    for f in sorted(md_files):
+        print(f"  ✓ {os.path.basename(f)}")
     if total_chars > 15000:
-        print(f"  [WARNING] Total summary length ({total_chars} chars) is getting large.")
-        print(f"  Consider removing less relevant papers from docs/ to save tokens.")
-    print(f"  Run with --show-summaries to view full summaries")
-    print(f"  Run with --resummarize to force re-summarization\n")
+        print(f"  [WARNING] Total size ({total_chars} chars) is large. "
+              f"Consider removing less relevant summaries from docs/summaries/.")
+    print(f"  Summaries location: docs/summaries/")
+    print(f"  --show-summaries  View full content")
+    print(f"  --resummarize     Force re-summarize all papers\n")
 
-    # --show-summaries 时打印完整内容
     if "--show-summaries" in sys.argv:
         print("=" * 60)
         print(_reference_papers)
