@@ -27,10 +27,188 @@ import glob
 import urllib.request
 import urllib.parse
 from typing import Annotated
+from datetime import datetime
 from dotenv import load_dotenv
 import autogen
 
 load_dotenv()
+
+
+# ============================================================
+# Cost Tracking
+# ============================================================
+# 估算每次 session 的 API 费用。基于 token 数量和模型定价。
+# Anthropic Claude pricing (approximate, $/1M tokens):
+#   claude-opus-4-5:   input $15, output $75
+#   claude-sonnet-4-5: input $3,  output $15
+
+PRICING = {
+    "claude-opus-4-5":      {"input": 15.0, "output": 75.0},
+    "claude-sonnet-4-5":    {"input": 3.0,  "output": 15.0},
+    "claude-sonnet-4-5-20250514": {"input": 3.0, "output": 15.0},
+    "gpt-4o":               {"input": 2.5,  "output": 10.0},
+}
+
+
+class CostTracker:
+    """追踪 session 的 token 消耗和费用。"""
+
+    def __init__(self):
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_cost = 0.0
+        self.rounds = 0
+
+    def update_from_messages(self, messages):
+        """从 groupchat messages 估算 token 用量。
+        粗略估算: 1 token ≈ 4 个英文字符。"""
+        new_rounds = len(messages) - self.rounds
+        if new_rounds <= 0:
+            return
+
+        for msg in messages[self.rounds:]:
+            content = msg.get("content", "") or ""
+            # 粗略估算: 输出 token ≈ 内容长度/4
+            est_output = len(content) // 4
+            # 输入 token ≈ 之前所有消息的累计长度/4（上下文窗口）
+            est_input = sum(len(m.get("content", "") or "") for m in messages[:self.rounds]) // 4
+            self.total_output_tokens += est_output
+            self.total_input_tokens += est_input
+            self.rounds += 1
+
+    def get_cost(self, model: str = "claude-opus-4-5") -> float:
+        """计算估算费用。"""
+        prices = PRICING.get(model, PRICING["claude-opus-4-5"])
+        input_cost = (self.total_input_tokens / 1_000_000) * prices["input"]
+        output_cost = (self.total_output_tokens / 1_000_000) * prices["output"]
+        return input_cost + output_cost
+
+    def print_summary(self, model: str = "claude-opus-4-5"):
+        """打印费用摘要。"""
+        cost = self.get_cost(model)
+        print(f"\n{'=' * 50}")
+        print(f"SESSION COST ESTIMATE")
+        print(f"{'=' * 50}")
+        print(f"  Rounds:        {self.rounds}")
+        print(f"  Input tokens:  ~{self.total_input_tokens:,}")
+        print(f"  Output tokens: ~{self.total_output_tokens:,}")
+        print(f"  Model:         {model}")
+        print(f"  Est. cost:     ${cost:.4f}")
+        print(f"{'=' * 50}")
+        print(f"  (Rough estimate — actual cost may vary)")
+
+
+cost_tracker = CostTracker()
+
+
+# ============================================================
+# Cross-Session Memory
+# ============================================================
+# 简单的 JSON 文件记忆系统。记录：
+#   - 上次讨论过的 idea
+#   - 被否决的方向（避免重蹈覆辙）
+#   - 锁定的 idea
+
+MEMORY_FILE = os.path.join(os.path.dirname(__file__), "memory.json")
+
+
+def load_memory() -> dict:
+    """加载跨 session 记忆。"""
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"sessions": [], "locked_ideas": [], "rejected_directions": []}
+
+
+def save_memory(memory: dict):
+    """保存跨 session 记忆。"""
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(memory, f, indent=2, ensure_ascii=False)
+
+
+def update_memory_from_session(messages):
+    """从本次对话中提取关键信息并更新记忆。"""
+    memory = load_memory()
+
+    session_record = {
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "rounds": len(messages),
+        "ideas_discussed": [],
+        "locked": False,
+    }
+
+    for msg in messages:
+        content = msg.get("content", "") or ""
+        name = msg.get("name", "")
+
+        # 记录 Explorer 提出的 idea（包含 "pitch" 关键词的消息）
+        if name == "senior_explorer" and len(content) > 100:
+            # 取第一行作为 idea 概要
+            first_line = content.strip().split("\n")[0][:200]
+            if first_line not in session_record["ideas_discussed"]:
+                session_record["ideas_discussed"].append(first_line)
+
+        # 记录被否决的方向（Critic 说 "weak" 或 "not a paper"）
+        if name == "harsh_critic":
+            content_lower = content.lower()
+            if any(w in content_lower for w in ["weak", "not a paper", "tech report", "incremental"]):
+                # 找到被批评的上一条 explorer 消息
+                idx = messages.index(msg)
+                for prev in reversed(messages[:idx]):
+                    if prev.get("name") == "senior_explorer":
+                        direction = prev.get("content", "").strip().split("\n")[0][:200]
+                        if direction not in memory["rejected_directions"]:
+                            memory["rejected_directions"].append(direction)
+                        break
+
+        # 记录锁定的 idea
+        if "IDEA LOCKED" in content.upper():
+            session_record["locked"] = True
+            if content not in memory["locked_ideas"]:
+                memory["locked_ideas"].append(content[:2000])  # 截断防止太长
+
+    memory["sessions"].append(session_record)
+    # 只保留最近 20 个 session 记录，防止文件无限增长
+    memory["sessions"] = memory["sessions"][-20:]
+    memory["rejected_directions"] = memory["rejected_directions"][-30:]
+    memory["locked_ideas"] = memory["locked_ideas"][-10:]
+
+    save_memory(memory)
+    print(f"[Memory] Session memory updated → {MEMORY_FILE}")
+
+
+def get_memory_context() -> str:
+    """将记忆转化为可注入 system message 的上下文。"""
+    memory = load_memory()
+    if not memory["sessions"] and not memory["locked_ideas"]:
+        return ""
+
+    lines = ["\n\n--- CROSS-SESSION MEMORY ---"]
+
+    if memory["locked_ideas"]:
+        lines.append(f"\nPreviously LOCKED ideas ({len(memory['locked_ideas'])}):")
+        for i, idea in enumerate(memory["locked_ideas"], 1):
+            # 只取前几行
+            preview = idea.strip().split("\n")[0][:150]
+            lines.append(f"  {i}. {preview}")
+
+    if memory["rejected_directions"]:
+        lines.append(f"\nPreviously REJECTED directions (avoid repeating):")
+        for d in memory["rejected_directions"][-5:]:  # 只显示最近 5 个
+            lines.append(f"  - {d}")
+
+    if memory["sessions"]:
+        last = memory["sessions"][-1]
+        lines.append(f"\nLast session: {last['date']} ({last['rounds']} rounds)")
+        if last["ideas_discussed"]:
+            lines.append(f"  Ideas discussed:")
+            for idea in last["ideas_discussed"][:3]:
+                lines.append(f"    - {idea}")
+
+    return "\n".join(lines)
+
+
+_memory_context = get_memory_context()
 
 
 # ============================================================
@@ -366,7 +544,7 @@ Rules:
 5. When an idea has converged (Critic says OK, Mentor says feasible,
    LitExpert finds a real gap), say "IDEA LOCKED" and write a 1-page
    structured proposal.
-""",
+""" + _memory_context,
 )
 
 # ---- Literature Expert ----
@@ -731,10 +909,80 @@ def export_session(messages):
     return filepath
 
 
-if __name__ == "__main__":
-    user.initiate_chat(
-        manager,
-        message=INITIAL_PROMPT,
-    )
-    # 会话结束后自动导出
+def run_single_session(prompt=None, session_id=None):
+    """运行一次 brainstorm session。"""
+    prompt = prompt or INITIAL_PROMPT
+    label = f" (Session {session_id})" if session_id else ""
+    print(f"\n{'=' * 50}")
+    print(f"STARTING BRAINSTORM{label}")
+    print(f"{'=' * 50}\n")
+
+    user.initiate_chat(manager, message=prompt)
+
+    # 费用追踪
+    cost_tracker.update_from_messages(groupchat.messages)
+    model = config_list[0].get("model", "claude-opus-4-5")
+    cost_tracker.print_summary(model)
+
+    # 导出 session
     export_session(groupchat.messages)
+
+    # 更新跨 session 记忆
+    update_memory_from_session(groupchat.messages)
+
+    return groupchat.messages
+
+
+def run_parallel_sessions(n=3):
+    """并行运行多个 brainstorm session，使用不同的起始角度。"""
+    # 不同角度的 prompt 变体
+    angle_prompts = [
+        INITIAL_PROMPT,  # 原始 prompt
+        INITIAL_PROMPT.replace(
+            "Let's start. Senior Explorer, propose your first idea",
+            "Let's start. Senior Explorer, focus on QUANTIZATION + LORA co-design"
+        ),
+        INITIAL_PROMPT.replace(
+            "Let's start. Senior Explorer, propose your first idea",
+            "Let's start. Senior Explorer, focus on INFERENCE SCHEDULING for real-time VLA"
+        ),
+        INITIAL_PROMPT.replace(
+            "Let's start. Senior Explorer, propose your first idea",
+            "Let's start. Senior Explorer, focus on TRAINING EFFICIENCY (data, compute, time)"
+        ),
+    ][:n]
+
+    print(f"\n{'=' * 50}")
+    print(f"PARALLEL BRAINSTORM — {n} sessions")
+    print(f"{'=' * 50}")
+    print("NOTE: Parallel mode runs sessions WITHOUT human input.")
+    print("      Set human_input_mode='NEVER' for autonomous runs.\n")
+
+    # 并行模式必须关掉人类输入
+    user.human_input_mode = "NEVER"
+    user.max_consecutive_auto_reply = 40
+
+    results = []
+    for i, prompt in enumerate(angle_prompts, 1):
+        print(f"\n--- Starting Session {i}/{n} ---")
+        # 重置 groupchat
+        groupchat.messages.clear()
+        msgs = run_single_session(prompt=prompt, session_id=i)
+        results.append(msgs)
+
+    print(f"\n{'=' * 50}")
+    print(f"ALL {n} SESSIONS COMPLETE")
+    print(f"Check sessions/ folder for transcripts.")
+    print(f"{'=' * 50}")
+    return results
+
+
+if __name__ == "__main__":
+    if "--parallel" in sys.argv:
+        # python brainstorm.py --parallel 3
+        idx = sys.argv.index("--parallel")
+        n = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 3
+        n = max(1, min(5, n))  # 限制 1-5 个
+        run_parallel_sessions(n)
+    else:
+        run_single_session()
