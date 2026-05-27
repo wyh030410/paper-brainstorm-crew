@@ -170,14 +170,26 @@ if "--resummarize" in sys.argv:
 # Load reference papers at startup
 _reference_papers = load_reference_papers()
 
-# 启动时打印摘要，方便 review
+# 启动时打印论文列表（不打印完整摘要，太多了刷屏）
 if _reference_papers:
-    print("=" * 60)
-    print("LOADED REFERENCE PAPER SUMMARIES")
-    print("=" * 60)
-    print(_reference_papers)
-    print("=" * 60)
-    print("(If summaries look wrong, re-run with: python brainstorm.py --resummarize)\n")
+    cache = _load_summary_cache()
+    paper_count = len(cache)
+    total_chars = len(_reference_papers)
+    print(f"[PDF] Loaded {paper_count} reference papers ({total_chars} chars in system message):")
+    for key in cache:
+        name = key.split("|")[0]
+        print(f"  - {name}")
+    if total_chars > 15000:
+        print(f"  [WARNING] Total summary length ({total_chars} chars) is getting large.")
+        print(f"  Consider removing less relevant papers from docs/ to save tokens.")
+    print(f"  Run with --show-summaries to view full summaries")
+    print(f"  Run with --resummarize to force re-summarization\n")
+
+    # --show-summaries 时打印完整内容
+    if "--show-summaries" in sys.argv:
+        print("=" * 60)
+        print(_reference_papers)
+        print("=" * 60)
 
 
 # ============================================================
