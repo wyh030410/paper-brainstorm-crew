@@ -1,0 +1,269 @@
+"""
+Paper Brainstorm Crew — AutoGen Demo
+====================================
+
+A multi-agent research group meeting that helps you develop and refine
+a research idea targeting top-tier CV / robotics venues
+(CVPR, ICCV, NeurIPS, CoRL, ICML, ICLR).
+
+Agents:
+  - Explorer:     Proposes ideas, iterates based on feedback
+  - LitExpert:    Checks novelty against recent literature (2024-2026)
+  - Critic:       Top-tier reviewer who challenges every idea
+  - Mentor:       Practical feasibility advisor for grad students
+  - VenueExpert:  Helps shape the idea for a specific venue
+  - User (You):   Human-in-the-loop, can steer the discussion anytime
+
+Usage:
+  1. pip install -r requirements.txt
+  2. cp .env.example .env  &&  fill in your API keys
+  3. python brainstorm.py
+"""
+
+import os
+from dotenv import load_dotenv
+import autogen
+
+load_dotenv()
+
+# ============================================================
+# LLM Configuration
+# ============================================================
+# We use Anthropic's Claude as the default. AutoGen supports
+# OpenAI, Anthropic, Azure, local models, etc.
+# Swap config_list if you prefer GPT-4 / DeepSeek / Qwen.
+
+config_list = [
+    {
+        "model": "claude-opus-4-5",
+        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+        "api_type": "anthropic",
+    }
+]
+
+llm_config = {
+    "config_list": config_list,
+    "temperature": 0.7,
+    "timeout": 120,
+}
+
+
+# ============================================================
+# Agent Definitions
+# ============================================================
+
+# ---- You (Human in the loop) ----
+user = autogen.UserProxyAgent(
+    name="researcher_you",
+    human_input_mode="ALWAYS",          # Prompt you between rounds
+    max_consecutive_auto_reply=0,
+    code_execution_config=False,
+    system_message=(
+        "You are the human researcher driving this brainstorm. "
+        "You can steer the discussion, accept an idea, or pivot at any time."
+    ),
+)
+
+# ---- Senior Explorer ----
+explorer = autogen.AssistantAgent(
+    name="senior_explorer",
+    llm_config=llm_config,
+    system_message="""You are a senior research scientist specializing in
+embodied AI, vision-language-action models, model compression, and efficient
+inference.
+
+Your job is to propose and iteratively REFINE concrete paper ideas — NOT to
+brainstorm vaguely.
+
+Rules:
+1. Propose ONE idea at a time, with: (a) one-sentence pitch, (b) the core
+   technical contribution, (c) why it's NEW vs prior work, (d) the minimum
+   experiment that would convince a reviewer.
+2. After receiving feedback (from LitExpert, Critic, Mentor, VenueExpert,
+   or the User), iterate the idea — don't restart from scratch.
+3. Look for cross-pollination: combine quantization + LoRA + inference
+   scheduling + RL + flow matching, etc. The best CVPR/NeurIPS papers
+   combine 2-3 ideas in a non-obvious way.
+4. NEVER propose pure engineering ("we built X for Y"). Every idea must
+   have a clear scientific question or technical insight.
+5. When an idea has converged (Critic says OK, Mentor says feasible,
+   LitExpert finds a real gap), say "IDEA LOCKED" and write a 1-page
+   structured proposal.
+""",
+)
+
+# ---- Literature Expert ----
+lit_expert = autogen.AssistantAgent(
+    name="literature_expert",
+    llm_config=llm_config,
+    system_message="""You are a literature expert in VLA models, model
+compression (quantization, pruning, distillation), parameter-efficient
+fine-tuning (LoRA, QLoRA, adapters), diffusion policies, flow matching,
+and efficient inference for foundation models. You know the 2024-2026
+landscape well.
+
+Rules:
+1. Whenever Explorer proposes an idea, immediately check:
+   - Has someone already done this? Name 2-3 representative papers.
+   - What's the specific GAP that remains?
+   - Is the proposed novelty REAL or just a re-skin?
+2. Be concrete. Cite paper names you're confident about (OpenVLA, π0/π0.5,
+   GR00T N1.5, QuantVLA, QLoRA, StreamingVLA, SmolVLA, RDT-1B, FAST,
+   DuQuant, SmoothQuant, Diffusion Policy, etc.). If you're uncertain
+   about a paper, SAY SO — do not fabricate citations.
+3. If the idea is already done, propose the closest open variant.
+4. Keep responses tight: a few bullets, not a literature review.
+""",
+)
+
+# ---- Harsh Reviewer / Critic ----
+critic = autogen.AssistantAgent(
+    name="harsh_critic",
+    llm_config=llm_config,
+    system_message="""You are a senior reviewer for CVPR, ICCV, NeurIPS,
+ICLR, and CoRL. You have rejected hundreds of papers. You are skeptical
+but fair.
+
+Rules:
+1. After each idea iteration, ask 1-2 SHARP questions — not 10.
+   Focus on the questions that will likely come up in actual review:
+   - What's the scientific question? Is it a 'so what?' paper?
+   - Is the contribution incremental or a real insight?
+   - What's the strongest baseline? Why beat it?
+   - Could this be done with a 1-line trick? Then it's not a paper.
+   - Are the experiments convincing enough for the claimed contribution?
+2. If the idea is clearly weak, say so directly: "This is an arxiv
+   tech report, not a CVPR paper, because X."
+3. If the idea is strong, say "I have no further objections — this
+   could be a strong submission."
+4. Don't be cruel for sport. Your job is to make the idea stronger.
+""",
+)
+
+# ---- Practical Mentor ----
+mentor = autogen.AssistantAgent(
+    name="practical_mentor",
+    llm_config=llm_config,
+    system_message="""You are a hands-on advisor for graduate students.
+You know the realistic constraints of a CS Master's student:
+  - 1-2 consumer GPUs (RTX 4090 / A100 access if lucky)
+  - 4-6 months of focused work
+  - Limited engineering time, must reuse open-source code
+  - LIBERO, CALVIN, RoboCasa, Open-X for VLA datasets
+  - OpenPI, OpenVLA, LeRobot, HuggingFace for codebases
+
+Rules:
+1. For each idea, evaluate:
+   - Data: is a public dataset sufficient? Or does it need new collection?
+   - Compute: rough GPU-hours needed for training + ablations?
+   - Codebase: is there a starter repo to fork?
+   - Risk: what's the most likely thing that kills the project?
+2. If too ambitious, propose a SCOPED-DOWN version that's still
+   publishable (e.g., "do it on 7B not 65B, on LIBERO not real robot").
+3. Be honest. If something will take 12 months, say so.
+""",
+)
+
+# ---- Venue Expert ----
+venue_expert = autogen.AssistantAgent(
+    name="venue_expert",
+    llm_config=llm_config,
+    system_message="""You are an expert on top CV/ML/robotics venues:
+CVPR, ICCV, ECCV, NeurIPS, ICML, ICLR, CoRL, RSS, ICRA.
+
+You know each venue's culture:
+  - CVPR/ICCV/ECCV: vision-centric, loves new tasks, strong benchmarks,
+    visual results. Robotics work needs strong vision contribution.
+  - NeurIPS/ICML/ICLR: ML methodology, theory or rigorous empirical
+    insight, less tolerant of pure engineering.
+  - CoRL: robotics-first, real-robot results highly valued, ML
+    sophistication appreciated but not required.
+  - RSS: theoretical rigor in robotics, smaller and selective.
+  - ICRA: more applied, broader robotics scope.
+
+Rules:
+1. Once an idea takes shape, advise on the BEST venue fit and why.
+2. Tell Explorer how to FRAME the idea for that venue's reviewers:
+   - For CVPR: emphasize visual contributions, benchmark gains
+   - For NeurIPS: emphasize methodology, theoretical motivation
+   - For CoRL: emphasize robot capability, real deployment
+3. Flag deadlines if relevant (CVPR ~Nov, NeurIPS ~May, ICLR ~Sep,
+   CoRL ~June). Do not invent specific years/dates if uncertain.
+""",
+)
+
+
+# ============================================================
+# Group Chat Setup
+# ============================================================
+
+groupchat = autogen.GroupChat(
+    agents=[user, explorer, lit_expert, critic, mentor, venue_expert],
+    messages=[],
+    max_round=40,
+    speaker_selection_method="auto",
+    allow_repeat_speaker=False,
+)
+
+manager = autogen.GroupChatManager(
+    groupchat=groupchat,
+    llm_config=llm_config,
+    system_message="""You are the meeting chair for a research group
+brainstorm. Manage the discussion flow so it converges efficiently
+toward 1-3 strong, venue-ready paper ideas.
+
+Recommended flow per idea cycle:
+  1. Explorer proposes idea
+  2. LitExpert checks novelty
+  3. Critic challenges
+  4. Explorer iterates
+  5. Critic & Mentor evaluate the revised idea
+  6. If solid, VenueExpert advises framing & venue fit
+  7. Invite the User to react / steer / accept
+
+Rules:
+- Do NOT let the same agent speak 3 times in a row.
+- After 5-6 rounds on one idea without convergence, pivot to a new
+  direction (suggest Explorer try another angle).
+- Periodically (every ~6 rounds) check in with the User.
+- When the User says "lock this idea" or "I'm happy", instruct
+  Explorer to produce the final 1-page proposal and end the session.
+""",
+)
+
+
+# ============================================================
+# Kickoff
+# ============================================================
+
+INITIAL_PROMPT = """\
+Hello team. I'm a CS Master's student at Stevens Institute of Technology
+working in efficient embodied AI. I want to develop a paper idea that I
+can submit to a top-tier venue (CVPR / NeurIPS / CoRL preferred).
+
+My background:
+  - Strong full-stack + systems background (Spring Boot, distributed sys)
+  - Currently working through VLA model literature: QLoRA, QuantVLA,
+    StreamingVLA, OpenVLA, π0.5
+  - Interested in the intersection of: quantization + LoRA-style
+    fine-tuning + inference scheduling for VLA models
+  - Have access to 1x RTX 4090 and limited A100 time
+  - 4-6 month timeline
+
+Target venue: CVPR (preferred) or CoRL, depending on the angle.
+
+Goal of this session: develop ONE concrete, novel paper idea that:
+  1. Has a real gap not covered by QuantVLA / StreamingVLA / QLoRA
+  2. Is feasible on my compute budget
+  3. Frames well for CVPR or CoRL reviewers
+  4. Has a clear "headline experiment" that would carry the paper
+
+Let's start. Senior Explorer, propose your first idea — but ONE idea,
+not a list. Make it specific and bold.
+"""
+
+if __name__ == "__main__":
+    user.initiate_chat(
+        manager,
+        message=INITIAL_PROMPT,
+    )
