@@ -71,22 +71,25 @@ def _summarize_with_llm(paper_text: str, filename: str) -> str:
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-sonnet-4-5-20250514",  # 用 sonnet 总结，省钱
-            max_tokens=1000,
+            max_tokens=1500,
             messages=[{
                 "role": "user",
-                "content": f"""Summarize this academic paper in a structured format.
-Be concise but cover ALL key technical details. Output in English.
+                "content": f"""You are reading the FULL text of an academic paper. Summarize it
+in a structured format. Be concise but cover ALL key technical details
+including the method, experiments, and results. Output in English.
 
 Format:
 **Title:** ...
 **Authors:** ...
 **Problem:** What problem does this paper solve? (1-2 sentences)
-**Method:** Core technical approach (3-5 bullets)
-**Key Results:** Main experimental findings (2-3 bullets)
-**Limitations/Gaps:** What this paper does NOT solve (1-2 bullets)
+**Method:** Core technical approach (3-5 bullets, include specific techniques)
+**Key Results:** Main experimental findings with numbers (3-5 bullets)
+**Datasets/Benchmarks:** What was evaluated on
+**Limitations/Gaps:** What this paper does NOT solve (2-3 bullets)
+**Key Takeaway:** The one sentence a reviewer would remember
 
 Paper text from {filename}:
-{paper_text[:12000]}"""
+{paper_text}"""
             }]
         )
         return response.content[0].text
@@ -129,7 +132,7 @@ def load_reference_papers() -> str:
         try:
             reader = pypdf.PdfReader(pdf_path)
             pages_text = []
-            for page in reader.pages[:8]:  # 读前 8 页给 LLM 足够上下文
+            for page in reader.pages:  # 读全文所有页
                 text = page.extract_text()
                 if text:
                     pages_text.append(text.strip())
