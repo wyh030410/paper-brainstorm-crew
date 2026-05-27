@@ -34,17 +34,69 @@ load_dotenv()
 
 
 # ============================================================
-# PDF Paper Ingestion
+# PDF Paper Ingestion (AI-summarized)
 # ============================================================
-# Reads PDFs from the docs/ folder and extracts text summaries.
-# These summaries are injected into literature_expert's system
-# message so it has direct knowledge of the user's reference papers.
+# Reads PDFs from docs/, uses Claude to summarize each paper's
+# key points, and caches summaries in docs/.summaries.json.
+# The condensed summaries are injected into literature_expert's
+# system message — much more token-efficient than raw text.
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+SUMMARY_CACHE = os.path.join(DOCS_DIR, ".summaries.json") if os.path.isdir(
+    os.path.join(os.path.dirname(__file__), "docs")
+) else ""
+
+
+def _load_summary_cache() -> dict:
+    if SUMMARY_CACHE and os.path.exists(SUMMARY_CACHE):
+        with open(SUMMARY_CACHE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_summary_cache(cache: dict):
+    if SUMMARY_CACHE:
+        with open(SUMMARY_CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def _summarize_with_llm(paper_text: str, filename: str) -> str:
+    """调用 Claude API 生成论文结构化摘要。"""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return f"[No API key — raw excerpt]\n{paper_text[:2000]}"
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-5-20250514",  # 用 sonnet 总结，省钱
+            max_tokens=1000,
+            messages=[{
+                "role": "user",
+                "content": f"""Summarize this academic paper in a structured format.
+Be concise but cover ALL key technical details. Output in English.
+
+Format:
+**Title:** ...
+**Authors:** ...
+**Problem:** What problem does this paper solve? (1-2 sentences)
+**Method:** Core technical approach (3-5 bullets)
+**Key Results:** Main experimental findings (2-3 bullets)
+**Limitations/Gaps:** What this paper does NOT solve (1-2 bullets)
+
+Paper text from {filename}:
+{paper_text[:12000]}"""
+            }]
+        )
+        return response.content[0].text
+    except Exception as e:
+        print(f"[WARNING] LLM summary failed for {filename}: {e}")
+        return f"[Summary failed — raw excerpt]\n{paper_text[:2000]}"
 
 
 def load_reference_papers() -> str:
-    """读取 docs/ 下所有 PDF，提取前 3 页文本作为摘要。"""
+    """读取 docs/ 下所有 PDF，用 AI 总结后返回。结果缓存到本地。"""
     if not os.path.isdir(DOCS_DIR):
         return ""
 
@@ -59,14 +111,25 @@ def load_reference_papers() -> str:
               "Run: pip install pypdf")
         return ""
 
+    cache = _load_summary_cache()
     summaries = []
+    updated = False
+
     for pdf_path in sorted(pdf_files):
         filename = os.path.basename(pdf_path)
+        # 用文件大小+文件名作为缓存 key，文件变了就重新总结
+        file_size = os.path.getsize(pdf_path)
+        cache_key = f"{filename}|{file_size}"
+
+        if cache_key in cache:
+            summaries.append(f"### {filename}\n{cache[cache_key]}\n")
+            continue
+
+        # 需要新总结
         try:
             reader = pypdf.PdfReader(pdf_path)
-            # 提取前 5 页（abstract + intro + method）
             pages_text = []
-            for i, page in enumerate(reader.pages[:5]):
+            for page in reader.pages[:8]:  # 读前 8 页给 LLM 足够上下文
                 text = page.extract_text()
                 if text:
                     pages_text.append(text.strip())
@@ -74,24 +137,25 @@ def load_reference_papers() -> str:
             if not pages_text:
                 continue
 
-            # 截断到 ~8000 字符，保留足够的 abstract + intro + method
             full_text = "\n".join(pages_text)
-            if len(full_text) > 8000:
-                full_text = full_text[:8000] + "\n[...truncated]"
-
-            summaries.append(
-                f"### {filename}\n{full_text}\n"
-            )
+            print(f"[PDF] Summarizing {filename} with AI...")
+            summary = _summarize_with_llm(full_text, filename)
+            cache[cache_key] = summary
+            updated = True
+            summaries.append(f"### {filename}\n{summary}\n")
         except Exception as e:
             print(f"[WARNING] Failed to read {filename}: {e}")
+
+    if updated:
+        _save_summary_cache(cache)
 
     if not summaries:
         return ""
 
     return (
-        "\n\n--- REFERENCE PAPERS (from docs/ folder) ---\n"
-        "You have DIRECT access to the following papers. Use this knowledge "
-        "when checking novelty — these are ground truth, not guesses.\n\n"
+        "\n\n--- REFERENCE PAPERS (AI-summarized from docs/ folder) ---\n"
+        "You have structured summaries of the user's reference papers below. "
+        "Use this knowledge when checking novelty — these are ground truth.\n\n"
         + "\n---\n".join(summaries)
     )
 
