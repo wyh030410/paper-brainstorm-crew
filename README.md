@@ -132,11 +132,70 @@ Proposal 格式：
 
 ---
 
+### 5. Related Work 自动起草
+
+ProposalWriter 写完后，**RelatedWorkDrafter** 自动接力：
+
+- 从讨论中收集所有引用过的论文
+- 按主题分组（VLA Models、Quantization、Efficient Fine-tuning 等）
+- 写一段 300-500 词的 Related Work，可直接放进论文
+- 保存到 `proposals/<idea-name>-related-work.md`
+
+---
+
+### 6. API 费用追踪
+
+每次 session 结束后自动打印费用估算：
+
+```
+==================================================
+SESSION COST ESTIMATE
+==================================================
+  Rounds:        25
+  Input tokens:  ~120,000
+  Output tokens: ~15,000
+  Model:         claude-opus-4-5
+  Est. cost:     $2.9250
+==================================================
+```
+
+支持 Claude Opus、Sonnet、GPT-4o 的定价。
+
+---
+
+### 7. 多轮并行 Brainstorm
+
+用不同的切入角度同时跑多个 session，比较哪个方向更好：
+
+```bash
+# 跑 3 个 session，每个角度不同（自动模式，无需人工输入）
+python brainstorm.py --parallel 3
+```
+
+- Session 1: 默认 prompt
+- Session 2: 聚焦 quantization + LoRA co-design
+- Session 3: 聚焦 inference scheduling for real-time VLA
+- 每个 session 都有独立的 transcript 保存到 `sessions/`
+
+---
+
+### 8. 跨 Session 记忆
+
+系统会自动记住之前的讨论（保存在 `memory.json`）：
+
+- **之前锁定的 idea** — 避免重复讨论
+- **被否决的方向** — Explorer 不会再走老路
+- **上次讨论概要** — 新 session 有上下文
+
+记忆自动注入 Explorer 的 system message，无需手动操作。
+
+---
+
 ## 项目结构
 
 ```
 paper_brainstorm_crew/
-├── brainstorm.py          # 主程序：7 个 agent + 群聊 + 工具
+├── brainstorm.py          # 主程序：8 个 agent + 群聊 + 工具
 ├── requirements.txt       # 依赖
 ├── .env.example           # API key 模板
 ├── .env                   # 你的 API key（gitignored）
@@ -146,8 +205,10 @@ paper_brainstorm_crew/
 │       └── *.md
 ├── sessions/              # 会话记录（自动生成）
 │   └── YYYYMMDD-HHMM.md
-├── proposals/             # 锁定 idea 的 proposal（自动生成）
-│   └── <idea-name>.md
+├── proposals/             # 锁定 idea 的 proposal + related work
+│   ├── <idea-name>.md
+│   └── <idea-name>-related-work.md
+├── memory.json            # 跨 session 记忆（自动维护）
 ├── README.md              # 本文件
 └── CLAUDE.md              # 给 Claude Code 看的项目说明
 ```
@@ -160,6 +221,7 @@ paper_brainstorm_crew/
 |------|------|
 | `--show-summaries` | 启动时打印所有论文摘要的完整内容 |
 | `--resummarize` | 清除所有摘要缓存，强制重新总结 |
+| `--parallel N` | 并行跑 N 个 session（1-5），自动模式无需人工输入 |
 
 ---
 
