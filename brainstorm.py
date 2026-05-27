@@ -556,12 +556,71 @@ proposal_writer.register_for_llm(
 user.register_for_execution(name="save_proposal")(save_proposal)
 
 
+# ---- Related Work Drafter ----
+related_work_drafter = autogen.AssistantAgent(
+    name="related_work_drafter",
+    llm_config=llm_config,
+    system_message="""You are an academic writing specialist who drafts
+Related Work sections for top-tier CS papers.
+
+You are ONLY activated AFTER "IDEA LOCKED" and AFTER ProposalWriter
+has finished.
+
+Your job:
+1. Review the ENTIRE conversation history — collect every paper,
+   method, and benchmark that was mentioned by any agent (especially
+   LitExpert and Explorer).
+2. Organize them into 2-4 thematic groups (e.g., "VLA Models",
+   "Quantization for LLMs", "Efficient Fine-tuning", etc.).
+3. Write a cohesive Related Work section (300-500 words) in academic
+   English, suitable for a CVPR / NeurIPS submission.
+
+Rules:
+1. Only cite papers that were actually mentioned in the discussion.
+   Do NOT invent new citations.
+2. For each paper, explain what it did and how the PROPOSED idea
+   differs or builds upon it.
+3. End with a short paragraph positioning the proposed work:
+   "In contrast to prior work, our approach..."
+4. After writing, call save_related_work to save it.
+5. Use LaTeX-style citation placeholders: [Author et al., Year].
+""",
+)
+
+
+def save_related_work(
+    title: Annotated[str, "Short title matching the proposal (e.g. 'quantized-vla-lora')"],
+    content: Annotated[str, "The Related Work section in Markdown"],
+) -> str:
+    """Save the related work draft to proposals/<title>-related-work.md"""
+    proposals_dir = os.path.join(os.path.dirname(__file__), "proposals")
+    os.makedirs(proposals_dir, exist_ok=True)
+
+    slug = title.lower().replace(" ", "-")
+    for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+        slug = slug.replace(ch, '')
+    filepath = os.path.join(proposals_dir, f"{slug}-related-work.md")
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return f"Related work saved to {filepath}"
+
+
+related_work_drafter.register_for_llm(
+    name="save_related_work",
+    description="Save the drafted Related Work section to proposals/<title>-related-work.md",
+)(save_related_work)
+
+user.register_for_execution(name="save_related_work")(save_related_work)
+
+
 # ============================================================
 # Group Chat Setup
 # ============================================================
 
 groupchat = autogen.GroupChat(
-    agents=[user, explorer, lit_expert, critic, mentor, venue_expert, proposal_writer],
+    agents=[user, explorer, lit_expert, critic, mentor, venue_expert, proposal_writer, related_work_drafter],
     messages=[],
     max_round=40,
     speaker_selection_method="auto",
@@ -590,8 +649,9 @@ Rules:
   direction (suggest Explorer try another angle).
 - Periodically (every ~6 rounds) check in with the User.
 - When the User says "lock this idea" or "I'm happy", OR when
-  Explorer says "IDEA LOCKED", immediately call on ProposalWriter
-  to write the structured 1-page proposal and save it to file.
+  Explorer says "IDEA LOCKED", do the following in order:
+  1. Call on ProposalWriter to write and save the proposal.
+  2. Then call on RelatedWorkDrafter to draft and save Related Work.
 """,
 )
 
