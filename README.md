@@ -285,4 +285,4 @@ claude  # 在项目目录里启动 Claude Code
 
 ## License
 
-MIT — 随便用。
+This project is licensed under the [MIT License](LICENSE).
