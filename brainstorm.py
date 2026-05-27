@@ -21,10 +21,113 @@ Usage:
 """
 
 import os
+import json
+import hashlib
+import urllib.request
+import urllib.parse
+from typing import Annotated
 from dotenv import load_dotenv
 import autogen
 
 load_dotenv()
+
+
+# ============================================================
+# Semantic Scholar Literature Search Tool
+# ============================================================
+# Gives literature_expert access to real paper search via the
+# Semantic Scholar API (free, no key required).
+# Results are cached locally in .paper_cache.json to avoid
+# repeated requests.
+
+CACHE_FILE = os.path.join(os.path.dirname(__file__), ".paper_cache.json")
+
+
+def _load_cache() -> dict:
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_cache(cache: dict):
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def search_papers(
+    query: Annotated[str, "Search query, e.g. 'quantization VLA model'"],
+    max_results: Annotated[int, "Number of papers to return (1-10)"] = 5,
+    year_range: Annotated[str, "Year filter, e.g. '2024-2026'"] = "",
+) -> str:
+    """Search Semantic Scholar for real academic papers.
+
+    Returns titles, authors, year, citation count, and abstract snippet
+    for each matching paper. Use this to verify novelty claims and find
+    related work — never fabricate citations.
+    """
+    max_results = max(1, min(10, max_results))
+
+    # 构建缓存 key
+    cache_key = hashlib.md5(
+        f"{query}|{max_results}|{year_range}".encode()
+    ).hexdigest()
+    cache = _load_cache()
+    if cache_key in cache:
+        return cache[cache_key]
+
+    # 调 Semantic Scholar API
+    params = {
+        "query": query,
+        "limit": max_results,
+        "fields": "title,authors,year,citationCount,abstract,url",
+    }
+    if year_range and "-" in year_range:
+        parts = year_range.split("-")
+        params["year"] = f"{parts[0].strip()}-{parts[1].strip()}"
+
+    url = "https://api.semanticscholar.org/graph/v1/paper/search?" + urllib.parse.urlencode(params)
+
+    import time
+    data = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "PaperBrainstormCrew/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                time.sleep(2 * (attempt + 1))  # 退避重试: 2s, 4s
+                continue
+            return f"[Search failed: HTTP {e.code}] — fall back to your training knowledge, but flag uncertainty."
+        except Exception as e:
+            return f"[Search failed: {e}] — fall back to your training knowledge, but flag uncertainty."
+
+    papers = data.get("data", [])
+    if not papers:
+        return f"No papers found for query: '{query}'. Try different keywords."
+
+    # 格式化结果
+    lines = [f"Found {len(papers)} papers for '{query}':\n"]
+    for i, p in enumerate(papers, 1):
+        authors = ", ".join(a["name"] for a in (p.get("authors") or [])[:3])
+        if len(p.get("authors") or []) > 3:
+            authors += " et al."
+        abstract = (p.get("abstract") or "No abstract")[:200]
+        lines.append(
+            f"{i}. **{p.get('title', 'Untitled')}**\n"
+            f"   Authors: {authors}\n"
+            f"   Year: {p.get('year', '?')} | Citations: {p.get('citationCount', '?')}\n"
+            f"   URL: {p.get('url', 'N/A')}\n"
+            f"   Abstract: {abstract}...\n"
+        )
+
+    result = "\n".join(lines)
+    # 缓存结果
+    cache[cache_key] = result
+    _save_cache(cache)
+    return result
 
 # ============================================================
 # LLM Configuration
@@ -113,8 +216,19 @@ Rules:
    about a paper, SAY SO — do not fabricate citations.
 3. If the idea is already done, propose the closest open variant.
 4. Keep responses tight: a few bullets, not a literature review.
+5. You have a search_papers tool — USE IT to verify claims instead of
+   guessing. Search before making novelty judgments.
 """,
 )
+
+# Register the search tool so literature_expert can call it
+# and user proxy can execute it
+lit_expert.register_for_llm(
+    name="search_papers",
+    description="Search Semantic Scholar for real academic papers to verify novelty and find related work.",
+)(search_papers)
+
+user.register_for_execution(name="search_papers")(search_papers)
 
 # ---- Harsh Reviewer / Critic ----
 critic = autogen.AssistantAgent(
